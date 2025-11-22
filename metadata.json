@@ -1,0 +1,7 @@
+{
+  "name": "Gemini Phone English",
+  "description": "A conversational English tutor powered by Gemini that conducts a 5-question session based on your topic, provides real-time voice interaction, and generates a feedback report.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
