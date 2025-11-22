@@ -39,97 +39,120 @@ export const startConversation = async (topic: string): Promise<string> => {
 };
 
 /**
- * Sends user message and gets the tutor's response + pronunciation analysis.
+ * FAST PATH: Gets only the conversational text response to reduce latency.
  */
-export const sendChatMessage = async (
+export const getTutorResponse = async (
   currentHistory: Message[],
   newUserText: string,
   audioBase64: string | null,
   turnCount: number,
   maxTurns: number
-): Promise<{ text: string; pronunciation?: PronunciationResult }> => {
+): Promise<string> => {
   
   const historyPrompt = currentHistory.map(m => `${m.role === 'user' ? 'Student' : 'Tutor'}: ${m.text}`).join('\n');
   const isLastTurn = turnCount >= maxTurns;
 
-  // We use a JSON schema to get both the spoken response and the analysis cleanly
   const systemInstruction = `
     You are a phone English tutor.
     Current Turn: ${turnCount} of ${maxTurns}.
     
-    Your tasks:
-    1. Analyze the Student's input (audio and text). 
-    2. Evaluate their pronunciation and intonation compared to a native speaker ONLY if audio is provided.
-       - If audio is NOT provided, set pronunciationScore to -1 and pronunciationFeedback to "Text input".
-    3. Check for grammar or vocabulary errors.
-    4. Generate a natural conversational response.
-       - If there is a significant error, briefly mention it naturally.
-       - ${isLastTurn ? "Wrap up the conversation warmly. Do not ask a new question." : "Ask a follow-up question."}
-    
     Input Context:
     History: ${historyPrompt}
-    Student Text Transcript: ${newUserText}
-    Student Audio: ${audioBase64 ? "[Attached]" : "[Not Provided - Text Input Only]"}
+    Student Input: ${newUserText}
+    ${audioBase64 ? "[Student provided audio]" : "[Student provided text only]"}
+    
+    Task:
+    Generate a natural conversational response.
+    - Keep it concise (under 40 words) so the conversation flows quickly.
+    - ${isLastTurn ? "Wrap up the conversation warmly. Do not ask a new question." : "Ask a follow-up question."}
+    - Do NOT include meta-data or analysis in this response. Just the spoken text.
   `;
 
   const parts: any[] = [];
   
-  // Add audio part if available
+  // Add audio part if available (so the model "hears" the user for context)
   if (audioBase64) {
     parts.push({
       inlineData: {
-        mimeType: "audio/webm; codecs=opus", // Common container for MediaRecorder
+        mimeType: "audio/webm; codecs=opus",
         data: audioBase64
       }
     });
   }
   
-  // Add text part
-  parts.push({
-    text: systemInstruction
-  });
-
-  const response = await ai.models.generateContent({
-    model: MODEL_CHAT,
-    contents: {
-      parts: parts
-    },
-    config: {
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          conversationalResponse: { type: Type.STRING, description: "The text you will speak back to the student." },
-          pronunciationScore: { type: Type.INTEGER, description: "Score 0-100 based on native-like accuracy. Use -1 if no audio." },
-          pronunciationFeedback: { type: Type.STRING, description: "Specific advice on pronunciation. Use 'Text input' if no audio." }
-        },
-        required: ["conversationalResponse", "pronunciationScore", "pronunciationFeedback"]
-      }
-    }
-  });
+  parts.push({ text: systemInstruction });
 
   try {
-    const json = JSON.parse(response.text || "{}");
-    
-    // Filter out valid pronunciation results vs text-only placeholders
-    let pronunciation: PronunciationResult | undefined;
-    if (json.pronunciationScore !== undefined && json.pronunciationScore >= 0) {
-      pronunciation = {
-        score: json.pronunciationScore,
-        feedback: json.pronunciationFeedback || "Good pronunciation."
-      };
-    }
+    const response = await ai.models.generateContent({
+      model: MODEL_CHAT,
+      contents: { parts: parts }
+    });
+    return response.text || "I see. Let's continue.";
+  } catch (e) {
+    console.error("Error getting tutor response", e);
+    return "I'm having trouble connecting. Could you say that again?";
+  }
+};
 
+/**
+ * SLOW PATH: Analyzes pronunciation and grammar in the background.
+ */
+export const analyzeStudentInput = async (
+  userText: string,
+  audioBase64: string | null
+): Promise<PronunciationResult | undefined> => {
+  
+  // If no audio, we can't really score pronunciation significantly
+  if (!audioBase64) {
     return {
-      text: json.conversationalResponse || "I see. Please continue.",
-      pronunciation
+      score: -1,
+      feedback: "Text input provided."
+    };
+  }
+
+  const prompt = `
+    Analyze the student's English speaking performance based on this audio and transcript.
+    
+    Transcript: ${userText}
+    Audio: [Attached]
+    
+    Return JSON:
+    {
+      "score": number (0-100, rate based on native-like pronunciation and intonation),
+      "feedback": string (short, specific advice on how to improve pronunciation or intonation. Max 15 words.)
+    }
+  `;
+
+  try {
+    const response = await ai.models.generateContent({
+      model: MODEL_CHAT,
+      contents: {
+        parts: [
+          { inlineData: { mimeType: "audio/webm; codecs=opus", data: audioBase64 } },
+          { text: prompt }
+        ]
+      },
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            score: { type: Type.INTEGER },
+            feedback: { type: Type.STRING }
+          },
+          required: ["score", "feedback"]
+        }
+      }
+    });
+
+    const json = JSON.parse(response.text || "{}");
+    return {
+      score: json.score ?? 0,
+      feedback: json.feedback || "No feedback available."
     };
   } catch (e) {
-    console.error("Error parsing Gemini response", e);
-    // Fallback
-    return {
-      text: response.text || "I heard you. Let's continue.",
-    };
+    console.error("Analysis failed", e);
+    return undefined;
   }
 };
 
@@ -169,10 +192,9 @@ export const generateSpeech = async (text: string): Promise<ArrayBuffer> => {
  * Generates the final structured feedback report.
  */
 export const generateFeedbackReport = async (history: Message[]): Promise<SessionFeedback> => {
-  // We pass the pronunciation feedback stored in messages to the final reviewer
   const historyText = history.map(m => {
     let entry = `${m.role}: ${m.text}`;
-    if (m.pronunciation) {
+    if (m.pronunciation && m.pronunciation.score >= 0) {
       entry += `\n(Pronunciation Score: ${m.pronunciation.score}, Feedback: ${m.pronunciation.feedback})`;
     }
     return entry;

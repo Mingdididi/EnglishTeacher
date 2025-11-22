@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Message } from '../types';
-import { sendChatMessage, generateSpeech } from '../services/geminiService';
+import { Message, PronunciationResult } from '../types';
+import { getTutorResponse, analyzeStudentInput, generateSpeech } from '../services/geminiService';
 
 interface ActiveCallScreenProps {
   topic: string;
@@ -22,6 +22,9 @@ const ActiveCallScreen: React.FC<ActiveCallScreenProps> = ({ topic, initialMessa
   const recognitionRef = useRef<any>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
+  
+  // Ref to hold the latest transcript to avoid closure staleness
+  const transcriptRef = useRef('');
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textInputRef = useRef<HTMLInputElement>(null);
@@ -57,26 +60,38 @@ const ActiveCallScreen: React.FC<ActiveCallScreenProps> = ({ topic, initialMessa
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (SpeechRecognition) {
       const recognition = new SpeechRecognition();
-      recognition.continuous = false;
+      // Continuous true allows users to pause without the mic turning off automatically
+      recognition.continuous = true; 
       recognition.interimResults = true;
       recognition.lang = 'en-US';
 
       recognition.onstart = () => {
         setIsListening(true);
-        startRecording(); // Start capturing actual audio
+        transcriptRef.current = '';
+        setTranscript('');
+        
+        // Slight delay to avoid resource conflict on some Android devices
+        setTimeout(() => {
+            startRecording(); 
+        }, 100);
       };
 
       recognition.onresult = (event: any) => {
         let currentTranscript = '';
-        for (let i = event.resultIndex; i < event.results.length; i++) {
+        // With continuous=true, we must iterate over all results to get the full text
+        for (let i = 0; i < event.results.length; i++) {
           currentTranscript += event.results[i][0].transcript;
         }
+        // Crucial: Update Ref immediately
+        transcriptRef.current = currentTranscript;
         setTranscript(currentTranscript);
       };
 
       recognition.onend = () => {
+        // Only set state to false. We rely on manual stop for submission in this new flow.
+        // If it stops unexpectedly (error/timeout), the user can tap to restart.
         setIsListening(false);
-        stopRecording(); // Stop capturing actual audio
+        stopRecording(); 
       };
       
       recognitionRef.current = recognition;
@@ -86,8 +101,13 @@ const ActiveCallScreen: React.FC<ActiveCallScreenProps> = ({ topic, initialMessa
   // MediaRecorder Logic
   const startRecording = async () => {
     try {
+      // Check if already recording to prevent errors
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+          return;
+      }
+
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' }); // Standard Chrome format
+      const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' }); 
       
       audioChunksRef.current = [];
       
@@ -134,27 +154,39 @@ const ActiveCallScreen: React.FC<ActiveCallScreenProps> = ({ topic, initialMessa
       await audioContextRef.current.resume();
     }
 
-    const audioBuffer = await audioContextRef.current.decodeAudioData(arrayBuffer);
-    const source = audioContextRef.current.createBufferSource();
-    source.buffer = audioBuffer;
-    source.connect(audioContextRef.current.destination);
-    
-    setIsSpeaking(true);
-    source.start(0);
-    
-    source.onended = () => {
-      setIsSpeaking(false);
+    try {
+      // Manual PCM Decoding for Gemini TTS (Raw 24kHz mono 16-bit PCM)
+      const dataInt16 = new Int16Array(arrayBuffer);
+      const sampleRate = 24000; 
+      const numChannels = 1;
       
-      // Auto-start listening only if in voice mode
-      if (turnCount < MAX_TURNS) {
-        if (inputMode === 'voice') {
-          startListening();
-        }
-      } else {
-        setTimeout(() => onEndSession(messages), 1500);
+      const audioBuffer = audioContextRef.current.createBuffer(numChannels, dataInt16.length, sampleRate);
+      const channelData = audioBuffer.getChannelData(0);
+      
+      for (let i = 0; i < dataInt16.length; i++) {
+         // Normalize 16-bit integer to float [-1.0, 1.0]
+         channelData[i] = dataInt16[i] / 32768.0;
       }
-    };
-  }, [turnCount, messages, onEndSession, MAX_TURNS, inputMode]);
+
+      const source = audioContextRef.current.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(audioContextRef.current.destination);
+      
+      setIsSpeaking(true);
+      source.start(0);
+      
+      source.onended = () => {
+        setIsSpeaking(false);
+        // Logic for auto-listening removed to support "Tap to speak" preference
+        if (turnCount >= MAX_TURNS) {
+          setTimeout(() => onEndSession(messages), 1500);
+        }
+      };
+    } catch (e) {
+        console.error("Audio playback error", e);
+        setIsSpeaking(false);
+    }
+  }, [turnCount, messages, onEndSession, MAX_TURNS]);
 
   // Initial load
   useEffect(() => {
@@ -167,7 +199,6 @@ const ActiveCallScreen: React.FC<ActiveCallScreenProps> = ({ topic, initialMessa
         playAudio(audioData);
       } catch (e) {
         console.error("Initial TTS failed", e);
-        // If TTS fails, just unlock controls
       }
     };
     start();
@@ -177,7 +208,6 @@ const ActiveCallScreen: React.FC<ActiveCallScreenProps> = ({ topic, initialMessa
   const startListening = () => {
     if (recognitionRef.current && !isListening && !isProcessing && !isSpeaking) {
       try {
-        setTranscript('');
         recognitionRef.current.start();
       } catch (e) {
         console.error("Already started", e);
@@ -190,12 +220,23 @@ const ActiveCallScreen: React.FC<ActiveCallScreenProps> = ({ topic, initialMessa
       recognitionRef.current.stop();
     }
     
-    // Small delay to allow recorder to flush
+    // Wait a moment for the final result to settle from SpeechRecognition
+    // This delay allows the 'onresult' to fire one last time with any buffered audio
     setTimeout(() => {
-      if (transcript.trim().length > 0) {
-        handleUserResponse(transcript, true);
+      const finalTranscript = transcriptRef.current;
+      if (finalTranscript.trim().length > 0) {
+        handleUserResponse(finalTranscript, true);
+      } else {
+        // If nothing captured, don't send. Just reset.
+        // Usually this happens if mic permission denied or silence.
+        setTranscript('No speech detected. Please try again.');
+        setTimeout(() => {
+            if (transcriptRef.current === 'No speech detected. Please try again.') {
+                setTranscript('');
+            }
+        }, 2000);
       }
-    }, 200);
+    }, 800); // Slightly increased delay for safety
   };
 
   const handleSendText = () => {
@@ -208,12 +249,16 @@ const ActiveCallScreen: React.FC<ActiveCallScreenProps> = ({ topic, initialMessa
   const handleUserResponse = async (text: string, hasAudio: boolean) => {
     setIsProcessing(true);
     const userMsg: Message = { role: 'user', text: text, timestamp: Date.now() };
+    const nextTurn = turnCount + 1;
+    setTurnCount(nextTurn);
     
-    const newHistory = [...messages, userMsg];
-    setMessages(newHistory);
+    // Optimistically add user message
+    setMessages(prev => [...prev, userMsg]);
     setTranscript('');
+    transcriptRef.current = '';
 
     try {
+      // 1. Prepare Audio Data
       let audioBase64: string | null = null;
       if (hasAudio) {
          const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
@@ -222,23 +267,30 @@ const ActiveCallScreen: React.FC<ActiveCallScreenProps> = ({ topic, initialMessa
          }
       }
 
-      const nextTurn = turnCount + 1;
-      setTurnCount(nextTurn);
+      // 2. Fire & Forget Analysis (Background)
+      analyzeStudentInput(text, audioBase64).then(pronunciation => {
+         if (pronunciation) {
+            setMessages(prev => {
+              const updated = [...prev];
+              for (let i = updated.length - 1; i >= 0; i--) {
+                if (updated[i].role === 'user' && updated[i].text === text && !updated[i].pronunciation) {
+                  updated[i].pronunciation = pronunciation;
+                  break;
+                }
+              }
+              return updated;
+            });
+         }
+      }).catch(e => console.error("Background analysis error", e));
 
-      const { text: responseText, pronunciation } = await sendChatMessage(newHistory, text, audioBase64, nextTurn, MAX_TURNS);
-      
-      // Update user message with pronunciation feedback (backfilling it into state)
-      if (pronunciation) {
-        setMessages(prev => {
-           const updated = [...prev];
-           updated[updated.length - 1].pronunciation = pronunciation; // Update last user message
-           return updated;
-        });
-      }
+      // 3. Get Conversational Response (Blocking - Fast)
+      const currentHistory = [...messages, userMsg];
+      const responseText = await getTutorResponse(currentHistory, text, audioBase64, nextTurn, MAX_TURNS);
       
       const modelMsg: Message = { role: 'model', text: responseText, timestamp: Date.now() };
       setMessages(prev => [...prev, modelMsg]);
 
+      // 4. Start TTS
       const audioData = await generateSpeech(responseText);
       await playAudio(audioData);
       
@@ -290,9 +342,9 @@ const ActiveCallScreen: React.FC<ActiveCallScreenProps> = ({ topic, initialMessa
               </div>
             </div>
             
-            {/* Pronunciation Feedback Bubble - Only show if score exists */}
+            {/* Pronunciation Feedback Bubble */}
             {msg.role === 'user' && msg.pronunciation && msg.pronunciation.score >= 0 && (
-              <div className="flex justify-end">
+              <div className="flex justify-end animate-fade-in">
                  <div className="max-w-[75%] bg-amber-50 border border-amber-100 p-2 rounded-lg flex items-start gap-2">
                     <div className="bg-amber-100 p-1 rounded-full mt-0.5 shrink-0">
                        <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -309,7 +361,7 @@ const ActiveCallScreen: React.FC<ActiveCallScreenProps> = ({ topic, initialMessa
           </div>
         ))}
         
-        {isListening && transcript && (
+        {transcript && (
            <div className="flex justify-end">
              <div className="max-w-[80%] p-4 rounded-2xl text-sm leading-relaxed bg-indigo-400/50 text-white animate-pulse rounded-br-none">
                {transcript}
@@ -343,7 +395,7 @@ const ActiveCallScreen: React.FC<ActiveCallScreenProps> = ({ topic, initialMessa
                   <button
                     onClick={isListening ? stopListeningAndSend : startListening}
                     disabled={isSpeaking || isProcessing}
-                    className={`w-16 h-16 rounded-full flex items-center justify-center transition-all shadow-lg 
+                    className={`w-20 h-20 rounded-full flex items-center justify-center transition-all shadow-lg 
                       ${isListening 
                         ? 'bg-red-500 text-white scale-110 ring-4 ring-red-200' 
                         : isSpeaking || isProcessing
@@ -352,26 +404,30 @@ const ActiveCallScreen: React.FC<ActiveCallScreenProps> = ({ topic, initialMessa
                       }`}
                   >
                     {isProcessing ? (
-                       <svg className="animate-spin h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                       <svg className="animate-spin h-8 w-8" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                        </svg>
                     ) : (
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        {isListening ? (
+                      isListening ? (
+                        // Send Icon
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-10 w-10" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /> 
-                        ) : (
+                        </svg>
+                      ) : (
+                        // Mic Icon
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-10 w-10" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-                        )}
-                      </svg>
+                        </svg>
+                      )
                     )}
                   </button>
                   
-                   <div className="w-10"></div> {/* Spacer for alignment */}
+                   <div className="w-10"></div>
               </div>
               
-              <p className="text-xs text-slate-400 font-medium">
-                {isListening ? 'Tap to send' : isSpeaking ? 'Listen...' : isProcessing ? 'Analyzing...' : 'Tap to speak'}
+              <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">
+                {isListening ? 'Tap to Send' : isSpeaking ? 'Listen...' : isProcessing ? 'Analyzing...' : 'Tap to Speak'}
               </p>
             </div>
           </div>
