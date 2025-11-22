@@ -9,8 +9,12 @@ interface FeedbackScreenProps {
 
 const FeedbackScreen: React.FC<FeedbackScreenProps> = ({ feedback, onRestart }) => {
   
-  // Use real average score if available, else mock trend
-  const avgScore = feedback.pronunciationReview?.averageScore || 80;
+  // Use real average score if available. If user used text mostly, score might be 0.
+  const avgScore = feedback.pronunciationReview?.averageScore || 0;
+  const hasAudioPractice = avgScore > 0;
+
+  // Mock trend data based on average, but ideally we'd pass real turn-by-turn data
+  // For now, we just show a simple visualization if valid.
   const scoreData = [
     { name: 'Start', score: Math.max(0, avgScore - 10) },
     { name: 'Mid', score: avgScore },
@@ -31,30 +35,39 @@ const FeedbackScreen: React.FC<FeedbackScreenProps> = ({ feedback, onRestart }) 
             {/* Chart Section - Now Pronunciation Focus */}
             <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-100">
             <h3 className="text-lg font-semibold text-slate-800 mb-1">Pronunciation Score</h3>
-            <div className="flex items-end gap-2 mb-4">
-                <span className="text-4xl font-bold text-indigo-600">{feedback.pronunciationReview?.averageScore || '-'}</span>
-                <span className="text-sm text-slate-400 mb-1.5">/ 100</span>
-            </div>
-            <div className="h-32 w-full">
-                <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={scoreData}>
-                    <defs>
-                    <linearGradient id="colorScore" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#4f46e5" stopOpacity={0.3}/>
-                        <stop offset="95%" stopColor="#4f46e5" stopOpacity={0}/>
-                    </linearGradient>
-                    </defs>
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0"/>
-                    <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fontSize: 12, fill: '#94a3b8'}} />
-                    <YAxis hide domain={[0, 100]} />
-                    <Tooltip 
-                    contentStyle={{borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)'}}
-                    cursor={{stroke: '#4f46e5', strokeWidth: 2}}
-                    />
-                    <Area type="monotone" dataKey="score" stroke="#4f46e5" strokeWidth={3} fillOpacity={1} fill="url(#colorScore)" />
-                </AreaChart>
-                </ResponsiveContainer>
-            </div>
+            
+            {hasAudioPractice ? (
+              <>
+                <div className="flex items-end gap-2 mb-4">
+                    <span className="text-4xl font-bold text-indigo-600">{feedback.pronunciationReview?.averageScore || '-'}</span>
+                    <span className="text-sm text-slate-400 mb-1.5">/ 100</span>
+                </div>
+                <div className="h-32 w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={scoreData}>
+                        <defs>
+                        <linearGradient id="colorScore" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor="#4f46e5" stopOpacity={0.3}/>
+                            <stop offset="95%" stopColor="#4f46e5" stopOpacity={0}/>
+                        </linearGradient>
+                        </defs>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0"/>
+                        <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fontSize: 12, fill: '#94a3b8'}} />
+                        <YAxis hide domain={[0, 100]} />
+                        <Tooltip 
+                        contentStyle={{borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)'}}
+                        cursor={{stroke: '#4f46e5', strokeWidth: 2}}
+                        />
+                        <Area type="monotone" dataKey="score" stroke="#4f46e5" strokeWidth={3} fillOpacity={1} fill="url(#colorScore)" />
+                    </AreaChart>
+                    </ResponsiveContainer>
+                </div>
+              </>
+            ) : (
+              <div className="h-40 flex items-center justify-center text-slate-400 text-sm text-center px-4">
+                 No audio data recorded. Try using the microphone next time to get pronunciation scoring!
+              </div>
+            )}
             </div>
 
             {/* Pronunciation Tips */}
@@ -69,7 +82,9 @@ const FeedbackScreen: React.FC<FeedbackScreenProps> = ({ feedback, onRestart }) 
                             </li>
                         ))
                     ) : (
-                        <p className="text-slate-500 italic text-sm">Excellent pronunciation! Keep it up.</p>
+                        <p className="text-slate-500 italic text-sm">
+                           {hasAudioPractice ? "Excellent pronunciation! Keep it up." : "N/A for text sessions."}
+                        </p>
                     )}
                 </ul>
             </div>

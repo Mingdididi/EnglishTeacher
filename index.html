@@ -2,13 +2,16 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <title>Gemini Phone English</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
       body {
         font-family: 'Inter', sans-serif;
+        /* Mobile viewport height fix */
+        height: 100dvh; 
+        overscroll-behavior-y: none; /* Prevent pull-to-refresh on mobile */
       }
       /* Custom scrollbar for chat logs */
       .scrollbar-hide::-webkit-scrollbar {
@@ -38,7 +41,7 @@
 }
 </script>
 </head>
-  <body class="bg-slate-50 text-slate-900 h-screen w-screen overflow-hidden">
+  <body class="bg-slate-50 text-slate-900 w-screen overflow-hidden">
     <div id="root" class="h-full w-full"></div>
   </body>
 </html>

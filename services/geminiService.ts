@@ -59,7 +59,8 @@ export const sendChatMessage = async (
     
     Your tasks:
     1. Analyze the Student's input (audio and text). 
-    2. Evaluate their pronunciation and intonation compared to a native speaker.
+    2. Evaluate their pronunciation and intonation compared to a native speaker ONLY if audio is provided.
+       - If audio is NOT provided, set pronunciationScore to -1 and pronunciationFeedback to "Text input".
     3. Check for grammar or vocabulary errors.
     4. Generate a natural conversational response.
        - If there is a significant error, briefly mention it naturally.
@@ -68,7 +69,7 @@ export const sendChatMessage = async (
     Input Context:
     History: ${historyPrompt}
     Student Text Transcript: ${newUserText}
-    Student Audio: [Attached]
+    Student Audio: ${audioBase64 ? "[Attached]" : "[Not Provided - Text Input Only]"}
   `;
 
   const parts: any[] = [];
@@ -99,8 +100,8 @@ export const sendChatMessage = async (
         type: Type.OBJECT,
         properties: {
           conversationalResponse: { type: Type.STRING, description: "The text you will speak back to the student." },
-          pronunciationScore: { type: Type.INTEGER, description: "Score 0-100 based on native-like accuracy." },
-          pronunciationFeedback: { type: Type.STRING, description: "Specific advice on pronunciation (e.g., 'R vs L', intonation). Keep it brief. If perfect, say 'Excellent'." }
+          pronunciationScore: { type: Type.INTEGER, description: "Score 0-100 based on native-like accuracy. Use -1 if no audio." },
+          pronunciationFeedback: { type: Type.STRING, description: "Specific advice on pronunciation. Use 'Text input' if no audio." }
         },
         required: ["conversationalResponse", "pronunciationScore", "pronunciationFeedback"]
       }
@@ -109,12 +110,19 @@ export const sendChatMessage = async (
 
   try {
     const json = JSON.parse(response.text || "{}");
+    
+    // Filter out valid pronunciation results vs text-only placeholders
+    let pronunciation: PronunciationResult | undefined;
+    if (json.pronunciationScore !== undefined && json.pronunciationScore >= 0) {
+      pronunciation = {
+        score: json.pronunciationScore,
+        feedback: json.pronunciationFeedback || "Good pronunciation."
+      };
+    }
+
     return {
       text: json.conversationalResponse || "I see. Please continue.",
-      pronunciation: {
-        score: json.pronunciationScore || 85,
-        feedback: json.pronunciationFeedback || "Good pronunciation."
-      }
+      pronunciation
     };
   } catch (e) {
     console.error("Error parsing Gemini response", e);
@@ -181,7 +189,7 @@ export const generateFeedbackReport = async (history: Message[]): Promise<Sessio
     1. overallComments (string): General feedback on fluency and confidence.
     2. corrections (array): List of specific grammar/vocab errors.
     3. vocabulary (array): 3-5 useful advanced words.
-    4. pronunciationReview (object): 'averageScore' (number 0-100) and 'tips' (array of strings) summarizing the pronunciation issues found in the history.
+    4. pronunciationReview (object): 'averageScore' (number 0-100) and 'tips' (array of strings) summarizing the pronunciation issues found in the history. Calculate average score ONLY from turns that have a score. If no audio was used, return 0 and "No audio provided" tip.
   `;
 
   const response = await ai.models.generateContent({

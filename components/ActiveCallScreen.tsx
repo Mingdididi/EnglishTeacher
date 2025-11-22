@@ -13,6 +13,8 @@ const ActiveCallScreen: React.FC<ActiveCallScreenProps> = ({ topic, initialMessa
   const [isListening, setIsListening] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [inputMode, setInputMode] = useState<'voice' | 'text'>('voice');
+  const [textInput, setTextInput] = useState('');
   const [transcript, setTranscript] = useState('');
   const [turnCount, setTurnCount] = useState(0);
   
@@ -22,6 +24,7 @@ const ActiveCallScreen: React.FC<ActiveCallScreenProps> = ({ topic, initialMessa
   const audioChunksRef = useRef<Blob[]>([]);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const textInputRef = useRef<HTMLInputElement>(null);
 
   const MAX_TURNS = 5;
 
@@ -33,6 +36,13 @@ const ActiveCallScreen: React.FC<ActiveCallScreenProps> = ({ topic, initialMessa
   useEffect(() => {
     scrollToBottom();
   }, [messages, transcript]);
+
+  // Focus input when switching to text mode
+  useEffect(() => {
+    if (inputMode === 'text' && textInputRef.current) {
+      textInputRef.current.focus();
+    }
+  }, [inputMode]);
 
   // Initialize Audio Context
   useEffect(() => {
@@ -70,8 +80,6 @@ const ActiveCallScreen: React.FC<ActiveCallScreenProps> = ({ topic, initialMessa
       };
       
       recognitionRef.current = recognition;
-    } else {
-      alert("Your browser doesn't support Speech Recognition. Please use Chrome.");
     }
   }, []);
 
@@ -136,13 +144,17 @@ const ActiveCallScreen: React.FC<ActiveCallScreenProps> = ({ topic, initialMessa
     
     source.onended = () => {
       setIsSpeaking(false);
+      
+      // Auto-start listening only if in voice mode
       if (turnCount < MAX_TURNS) {
-        startListening();
+        if (inputMode === 'voice') {
+          startListening();
+        }
       } else {
         setTimeout(() => onEndSession(messages), 1500);
       }
     };
-  }, [turnCount, messages, onEndSession, MAX_TURNS]);
+  }, [turnCount, messages, onEndSession, MAX_TURNS, inputMode]);
 
   // Initial load
   useEffect(() => {
@@ -155,7 +167,7 @@ const ActiveCallScreen: React.FC<ActiveCallScreenProps> = ({ topic, initialMessa
         playAudio(audioData);
       } catch (e) {
         console.error("Initial TTS failed", e);
-        startListening(); 
+        // If TTS fails, just unlock controls
       }
     };
     start();
@@ -177,22 +189,23 @@ const ActiveCallScreen: React.FC<ActiveCallScreenProps> = ({ topic, initialMessa
     if (recognitionRef.current) {
       recognitionRef.current.stop();
     }
-    // The onend handler will trigger handleUserResponse implicitly if we wire it up there?
-    // Actually SpeechRecognition onend just sets isListening=false.
-    // We need to manually trigger the send logic.
-    // But wait, SpeechRecognition is async. Let's wait for onend or force it.
-    // Simpler: onend calls stopRecording. We can trigger send in a useEffect looking at isListening?
-    // Or just call logic here directly.
     
-    // Let's use a short timeout to ensure recorder chunks are flushed.
+    // Small delay to allow recorder to flush
     setTimeout(() => {
       if (transcript.trim().length > 0) {
-        handleUserResponse(transcript);
+        handleUserResponse(transcript, true);
       }
     }, 200);
   };
 
-  const handleUserResponse = async (text: string) => {
+  const handleSendText = () => {
+    if (textInput.trim().length > 0) {
+      handleUserResponse(textInput, false);
+      setTextInput('');
+    }
+  };
+
+  const handleUserResponse = async (text: string, hasAudio: boolean) => {
     setIsProcessing(true);
     const userMsg: Message = { role: 'user', text: text, timestamp: Date.now() };
     
@@ -201,9 +214,13 @@ const ActiveCallScreen: React.FC<ActiveCallScreenProps> = ({ topic, initialMessa
     setTranscript('');
 
     try {
-      // Process audio blob
-      const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-      const audioBase64 = audioChunksRef.current.length > 0 ? await blobToBase64(audioBlob) : null;
+      let audioBase64: string | null = null;
+      if (hasAudio) {
+         const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+         if (audioChunksRef.current.length > 0) {
+             audioBase64 = await blobToBase64(audioBlob);
+         }
+      }
 
       const nextTurn = turnCount + 1;
       setTurnCount(nextTurn);
@@ -228,20 +245,25 @@ const ActiveCallScreen: React.FC<ActiveCallScreenProps> = ({ topic, initialMessa
     } catch (error) {
       console.error("Error in loop", error);
       setMessages(prev => [...prev, { role: 'model', text: "Sorry, I had trouble connecting. Let's try again.", timestamp: Date.now() }]);
-      setIsProcessing(false); // Reset if error, otherwise reset in playAudio onended
+      setIsProcessing(false);
     } finally {
-       // setIsProcessing(false); // Done in playAudio start? No, we need to allow TTS to play.
-       // We keep isProcessing true until TTS starts? 
-       // Let's set false here so UI updates, but controls are locked by isSpeaking.
        setIsProcessing(false);
     }
+  };
+
+  const toggleMode = () => {
+    if (isListening) {
+      recognitionRef.current?.stop();
+      setIsListening(false);
+    }
+    setInputMode(prev => prev === 'voice' ? 'text' : 'voice');
   };
 
   return (
     <div className="flex flex-col h-full bg-slate-50 relative">
       
       {/* Header */}
-      <div className="bg-white border-b border-slate-200 p-4 flex justify-between items-center shadow-sm z-10">
+      <div className="bg-white border-b border-slate-200 p-4 flex justify-between items-center shadow-sm z-10 shrink-0">
         <div>
           <h2 className="font-semibold text-slate-800">{topic}</h2>
           <p className="text-xs text-slate-500">Question {Math.min(turnCount + 1, MAX_TURNS)} / {MAX_TURNS}</p>
@@ -249,17 +271,17 @@ const ActiveCallScreen: React.FC<ActiveCallScreenProps> = ({ topic, initialMessa
         <div className="flex items-center gap-2">
           <span className={`h-2 w-2 rounded-full ${isSpeaking || isListening ? 'bg-green-500 animate-pulse' : 'bg-slate-300'}`}></span>
           <span className="text-xs text-slate-600 font-medium">
-            {isProcessing ? 'Analyzing Audio...' : isSpeaking ? 'Tutor Speaking' : isListening ? 'Listening...' : 'Idle'}
+            {isProcessing ? 'Thinking...' : isSpeaking ? 'Speaking...' : isListening ? 'Listening...' : 'Idle'}
           </span>
         </div>
       </div>
 
       {/* Chat Area */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4 scrollbar-hide">
+      <div className="flex-1 overflow-y-auto p-4 space-y-4 scrollbar-hide bg-slate-50/50">
         {messages.map((msg, idx) => (
           <div key={idx} className="flex flex-col gap-1">
             <div className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-              <div className={`max-w-[80%] p-4 rounded-2xl text-sm leading-relaxed shadow-sm 
+              <div className={`max-w-[85%] p-3.5 rounded-2xl text-sm leading-relaxed shadow-sm 
                 ${msg.role === 'user' 
                   ? 'bg-indigo-600 text-white rounded-br-none' 
                   : 'bg-white text-slate-700 border border-slate-100 rounded-bl-none'}`}
@@ -268,11 +290,11 @@ const ActiveCallScreen: React.FC<ActiveCallScreenProps> = ({ topic, initialMessa
               </div>
             </div>
             
-            {/* Pronunciation Feedback Bubble */}
-            {msg.role === 'user' && msg.pronunciation && (
+            {/* Pronunciation Feedback Bubble - Only show if score exists */}
+            {msg.role === 'user' && msg.pronunciation && msg.pronunciation.score >= 0 && (
               <div className="flex justify-end">
                  <div className="max-w-[75%] bg-amber-50 border border-amber-100 p-2 rounded-lg flex items-start gap-2">
-                    <div className="bg-amber-100 p-1 rounded-full mt-0.5">
+                    <div className="bg-amber-100 p-1 rounded-full mt-0.5 shrink-0">
                        <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
                        </svg>
@@ -297,47 +319,100 @@ const ActiveCallScreen: React.FC<ActiveCallScreenProps> = ({ topic, initialMessa
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Visualizer / Controls */}
-      <div className="h-32 bg-white border-t border-slate-200 flex flex-col items-center justify-center relative">
+      {/* Controls Area */}
+      <div className={`bg-white border-t border-slate-200 transition-all duration-300 shrink-0 safe-area-pb ${inputMode === 'voice' ? 'h-40' : 'h-auto p-4'}`}>
         
-        {isSpeaking && (
-           <div className="absolute inset-0 flex items-center justify-center pointer-events-none overflow-hidden">
-              <div className="w-32 h-32 bg-indigo-100 rounded-full animate-pulse-ring absolute"></div>
-              <div className="w-48 h-48 bg-indigo-50 rounded-full animate-pulse-ring delay-75 absolute"></div>
-           </div>
+        {/* Voice Mode Controls */}
+        {inputMode === 'voice' && (
+          <div className="h-full flex flex-col items-center justify-center relative">
+            {isSpeaking && (
+               <div className="absolute inset-0 flex items-center justify-center pointer-events-none overflow-hidden">
+                  <div className="w-32 h-32 bg-indigo-100 rounded-full animate-pulse-ring absolute"></div>
+                  <div className="w-48 h-48 bg-indigo-50 rounded-full animate-pulse-ring delay-75 absolute"></div>
+               </div>
+            )}
+
+            <div className="relative z-10 flex flex-col items-center gap-3 w-full px-8">
+              <div className="flex items-center justify-between w-full">
+                  <button onClick={toggleMode} className="p-2 text-slate-400 hover:text-indigo-600 transition-colors" title="Switch to Keyboard">
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" />
+                    </svg>
+                  </button>
+
+                  <button
+                    onClick={isListening ? stopListeningAndSend : startListening}
+                    disabled={isSpeaking || isProcessing}
+                    className={`w-16 h-16 rounded-full flex items-center justify-center transition-all shadow-lg 
+                      ${isListening 
+                        ? 'bg-red-500 text-white scale-110 ring-4 ring-red-200' 
+                        : isSpeaking || isProcessing
+                          ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                          : 'bg-indigo-600 text-white hover:bg-indigo-700 ring-4 ring-indigo-50'
+                      }`}
+                  >
+                    {isProcessing ? (
+                       <svg className="animate-spin h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                         <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                         <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                       </svg>
+                    ) : (
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        {isListening ? (
+                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /> 
+                        ) : (
+                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+                        )}
+                      </svg>
+                    )}
+                  </button>
+                  
+                   <div className="w-10"></div> {/* Spacer for alignment */}
+              </div>
+              
+              <p className="text-xs text-slate-400 font-medium">
+                {isListening ? 'Tap to send' : isSpeaking ? 'Listen...' : isProcessing ? 'Analyzing...' : 'Tap to speak'}
+              </p>
+            </div>
+          </div>
         )}
 
-        <div className="relative z-10 flex flex-col items-center gap-2">
-          <button
-            onClick={isListening ? stopListeningAndSend : startListening}
-            disabled={isSpeaking || isProcessing}
-            className={`w-16 h-16 rounded-full flex items-center justify-center transition-all shadow-lg 
-              ${isListening 
-                ? 'bg-red-500 text-white scale-110 ring-4 ring-red-200' 
-                : isSpeaking || isProcessing
-                  ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
-                  : 'bg-indigo-600 text-white hover:bg-indigo-700 ring-4 ring-indigo-50'
-              }`}
-          >
-            {isProcessing ? (
-               <svg className="animate-spin h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-               </svg>
-            ) : (
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                {isListening ? (
-                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /> 
-                ) : (
-                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-                )}
-              </svg>
-            )}
-          </button>
-          <p className="text-xs text-slate-400 font-medium">
-            {isListening ? 'Tap to send' : isSpeaking ? 'Listen...' : isProcessing ? 'Analyzing...' : 'Tap to speak'}
-          </p>
-        </div>
+        {/* Text Mode Controls */}
+        {inputMode === 'text' && (
+          <div className="flex items-center gap-2">
+            <button onClick={toggleMode} className="p-3 rounded-full bg-slate-100 text-slate-500 hover:bg-slate-200 shrink-0">
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+                </svg>
+            </button>
+            <input 
+              ref={textInputRef}
+              type="text" 
+              value={textInput}
+              onChange={(e) => setTextInput(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && !isProcessing && handleSendText()}
+              placeholder="Type your answer..."
+              disabled={isProcessing || isSpeaking}
+              className="flex-1 bg-slate-100 border-none rounded-full px-4 py-3 text-slate-800 focus:ring-2 focus:ring-indigo-500 outline-none disabled:opacity-50"
+            />
+            <button 
+              onClick={handleSendText}
+              disabled={!textInput.trim() || isProcessing || isSpeaking}
+              className="p-3 rounded-full bg-indigo-600 text-white shadow-md disabled:opacity-50 disabled:shadow-none hover:bg-indigo-700 shrink-0"
+            >
+               {isProcessing ? (
+                  <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+               ) : (
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+                  </svg>
+               )}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
